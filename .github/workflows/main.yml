@@ -1,112 +1,85 @@
-name: AI YouTube Automation Test
+name: Create and upload video
 
 on:
   workflow_dispatch:
+    inputs:
+      format:
+        description: "short = vertical YouTube Short, video = horizontal video"
+        type: choice
+        options: [short, video]
+        default: short
+      topic:
+        description: "Leave EMPTY to let the AI pick a fresh topic"
+        type: string
+        required: false
+        default: ""
+      upload:
+        description: "Upload to YouTube (always PRIVATE for now)"
+        type: boolean
+        default: false
+  # Automatic runs. They stay OFF until you create the repository variable ENABLE_SCHEDULE = true
+  schedule:
+    - cron: "30 3 * * *"   # every day 09:00 India time  -> Short
+    - cron: "0 5 * * 0"    # every Sunday 10:30 India time -> long video
+
+permissions:
+  contents: write           # only used to save data/topics_done.txt
+
+concurrency:
+  group: video-pipeline
+  cancel-in-progress: false
 
 jobs:
-  youtube:
-    runs-on: ubuntu-latest
-
+  make-video:
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      FORMAT: ${{ github.event.inputs.format || (github.event.schedule == '0 5 * * 0' && 'video' || 'short') }}
+      INPUT_TOPIC: ${{ github.event.inputs.topic }}
+      DO_UPLOAD: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.upload }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
-      - name: Install FFmpeg
+      - name: Install ffmpeg and fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-core
 
       - name: Install Python packages
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Generate AI Topic
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python - <<'PY'
-          import os
-          import requests
-
-          api_key = os.environ["GEMINI_API_KEY"]
-
-          prompt = """
-          Generate ONE highly interesting YouTube Shorts topic.
-          Topic must be suitable for a faceless AI YouTube channel.
-          Make it educational, curiosity-driven and suitable for mass audience.
-          Return ONLY the topic, no explanation.
-          """
-
-          url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-
-          response = requests.post(
-              url,
-              params={"key": api_key},
-              json={
-                  "contents": [
-                      {
-                          "parts": [
-                              {"text": prompt}
-                          ]
-                      }
-                  ]
-              },
-              timeout=60
-          )
-
-          response.raise_for_status()
-
-          data = response.json()
-          topic = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-          with open("topic.txt", "w", encoding="utf-8") as f:
-              f.write(topic)
-
-          print("AI TOPIC:", topic)
-          PY
-
-      - name: Restore YouTube Token
-        env:
-          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
-        run: |
-          test -n "$YOUTUBE_TOKEN_JSON"
-          printf '%s' "$YOUTUBE_TOKEN_JSON" > token.json
-
-      - name: Create YouTube Client Secrets
-        env:
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-        run: |
-          python - <<'PY'
-          import os
-          import json
-
-          data = {
-              "installed": {
-                  "client_id": os.environ["YOUTUBE_CLIENT_ID"],
-                  "client_secret": os.environ["YOUTUBE_CLIENT_SECRET"],
-                  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                  "token_uri": "https://oauth2.googleapis.com/token",
-                  "redirect_uris": ["http://localhost"]
-              }
-          }
-
-          with open("client_secrets.json", "w") as f:
-              json.dump(data, f)
-          PY
-
-      - name: Run AI YouTube Pipeline
+      - name: Create video
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
         run: |
-          TOPIC="$(cat topic.txt)"
-          python main.py "$TOPIC" short true private
+          ARGS=(--format "$FORMAT")
+          if [ -n "$INPUT_TOPIC" ]; then ARGS+=(--topic "$INPUT_TOPIC"); fi
+          if [ "$DO_UPLOAD" = "true" ]; then ARGS+=(--upload); fi
+          python main.py "${ARGS[@]}"
+
+      - name: Keep the video (download from the run page, 7 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-output
+          path: output/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Save topic history
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/topics_done.txt
+          git diff --cached --quiet || (git commit -m "chore: record finished topic" && git pull --rebase && git push)
