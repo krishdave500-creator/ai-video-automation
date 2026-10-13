@@ -1,165 +1,91 @@
-"""
-Step 8 — Upload to YouTube using the YouTube Data API v3.
-Handles OAuth2 authentication and resumable uploads.
-"""
-
+"""YouTube upload (YouTube Data API v3). Fully non-interactive: credentials come from
+environment variables only, so it can never hang waiting for a browser login in CI."""
 import os
-import json
-from dotenv import load_dotenv
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 
-load_dotenv()
+from .config import CFG
+from .util import log
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-CLIENT_SECRETS_FILE = "client_secrets.json"
-TOKEN_FILE = "token.json"
-
-VIDEO_PATH = os.path.join("assets", "video", "final_subtitled.mp4")
-THUMBNAIL_PATH = os.path.join("assets", "video", "thumbnail.jpg")
+NEEDED = ["YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN"]
 
 
-def _ensure_client_secrets():
-    """Create client_secrets.json from .env variables if it doesn't exist."""
-    if os.path.exists(CLIENT_SECRETS_FILE):
-        return
+def _build_service():
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
 
-    client_id = os.getenv("YOUTUBE_CLIENT_ID")
-    client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
-
-    if not client_id or not client_secret:
-        raise RuntimeError(
-            "YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET must be set in .env "
-            "or provide a client_secrets.json file."
-        )
-
-    secrets = {
-        "installed": {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": ["http://localhost"],
-        }
-    }
-
-    with open(CLIENT_SECRETS_FILE, "w") as f:
-        json.dump(secrets, f, indent=2)
-    print(f"[Upload] Created {CLIENT_SECRETS_FILE} from .env credentials.")
+    missing = [n for n in NEEDED if not os.getenv(n)]
+    if missing:
+        raise RuntimeError("Missing YouTube credentials: " + ", ".join(missing))
+    creds = Credentials(None, refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"], token_uri="https://oauth2.googleapis.com/token",
+                        client_id=os.environ["YOUTUBE_CLIENT_ID"], client_secret=os.environ["YOUTUBE_CLIENT_SECRET"], scopes=SCOPES)
+    creds.refresh(Request())
+    return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
 
-def _get_authenticated_service():
-    """Authenticate with YouTube API, caching credentials in token.json."""
-    _ensure_client_secrets()
-
-    credentials = None
-
-    # Load cached token
-    if os.path.exists(TOKEN_FILE):
-        credentials = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-
-    # Refresh or get new credentials
-    if not credentials or not credentials.valid:
-        if credentials and credentials.expired and credentials.refresh_token:
-            credentials.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CLIENT_SECRETS_FILE, SCOPES
-            )
-            credentials = flow.run_local_server(port=8080)
-
-        # Save for next run
-        with open(TOKEN_FILE, "w") as f:
-            f.write(credentials.to_json())
-        print("[Upload] Credentials saved.")
-
-    return build("youtube", "v3", credentials=credentials)
+def effective_privacy(privacy: str | None) -> str:
+    """Only 'private' unless ALLOW_PUBLIC=true is set (YouTube locks API uploads of unaudited projects to private anyway)."""
+    p = (privacy or CFG.get("privacy", "private")).lower()
+    if p not in ("private", "unlisted", "public"):
+        p = "private"
+    if p != "private" and os.getenv("ALLOW_PUBLIC", "").lower() != "true":
+        log(f"[Upload] '{p}' requested but ALLOW_PUBLIC is not 'true' -> uploading as PRIVATE")
+        return "private"
+    return p
 
 
-def upload_video(
-    video_path: str = VIDEO_PATH,
-    title: str = "AI Generated Video",
-    description: str = "",
-    tags: list[str] = None,
-    category_id: str = "22",  # People & Blogs
-    privacy: str = "private",
-    thumbnail_path: str = THUMBNAIL_PATH,
-    is_short: bool = False,
-) -> str:
-    """
-    Upload video to YouTube with metadata.
-    Returns the video ID on success.
+def _parse_publish_at(value: str) -> str:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        raise ValueError("--publish-at needs a timezone, e.g. 2026-10-20T09:00:00+05:30")
+    if dt <= datetime.now(timezone.utc):
+        raise ValueError("--publish-at must be in the future")
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-    is_short: If True, adds #Shorts tag for YouTube Shorts
-    """
-    if not os.path.exists(video_path):
-        raise FileNotFoundError(f"Video not found: {video_path}")
 
-    youtube = _get_authenticated_service()
+def upload_video(video_path, title, description, tags, privacy="private", publish_at=None, thumbnail_path=None, is_short=False) -> str:
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaFileUpload
 
-    # Add #Shorts tag if it's a short video
-    final_tags = tags or []
-    if is_short and "Shorts" not in final_tags:
-        final_tags.append("Shorts")
-
-    # Add #Shorts to description if it's a short
-    final_description = description
-    if is_short and "#Shorts" not in final_description:
-        final_description += "\n\n#Shorts"
-
-    body = {
-        "snippet": {
-            "title": title,
-            "description": final_description,
-            "tags": final_tags,
-            "categoryId": category_id,
-        },
-        "status": {
-            "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": False,
-        },
-    }
-
-    media = MediaFileUpload(
-        video_path,
-        chunksize=256 * 1024,  # 256 KB chunks
-        resumable=True,
-        mimetype="video/mp4",
-    )
-
-    print(f"[Upload] Uploading '{title}' to YouTube ({privacy})...")
-    request = youtube.videos().insert(
-        part="snippet,status",
-        body=body,
-        media_body=media,
-    )
-
-    response = None
-    while response is None:
-        status, response = request.next_chunk()
-        if status:
-            print(f"[Upload] Progress: {int(status.progress() * 100)}%")
-
-    video_id = response["id"]
-    print(f"[Upload] ✓ Video uploaded: https://youtube.com/watch?v={video_id}")
-
-    # Set thumbnail if available
-    if thumbnail_path and os.path.exists(thumbnail_path):
+    video_path = Path(video_path)
+    if not video_path.exists():
+        raise FileNotFoundError(video_path)
+    status = {"privacyStatus": effective_privacy(privacy), "selfDeclaredMadeForKids": False}
+    if publish_at:
+        status["privacyStatus"] = "private"          # YouTube requires private + publishAt for scheduling
+        status["publishAt"] = _parse_publish_at(publish_at)
+    desc = description or ""
+    if is_short and "#shorts" not in desc.lower():
+        desc += "\n\n#Shorts"
+    body = {"snippet": {"title": title[:100], "description": desc[:4900], "tags": list(tags or []),
+                        "categoryId": str(CFG.get("category_id", "27")), "defaultLanguage": CFG.get("language", "en")},
+            "status": status}
+    yt = _build_service()
+    media = MediaFileUpload(str(video_path), chunksize=8 * 1024 * 1024, resumable=True, mimetype="video/mp4")
+    req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
+    log(f"[Upload] uploading '{title[:60]}' as {status['privacyStatus'].upper()}" + (f", publishes {status['publishAt']}" if publish_at else ""))
+    resp, fails = None, 0
+    while resp is None:
         try:
-            youtube.thumbnails().set(
-                videoId=video_id,
-                media_body=MediaFileUpload(thumbnail_path, mimetype="image/jpeg"),
-            ).execute()
-            print(f"[Upload] ✓ Thumbnail set.")
-        except Exception as e:
-            print(f"[Upload] Thumbnail upload failed (may need verified account): {e}")
-
-    return video_id
-
-
-if __name__ == "__main__":
-    vid = upload_video()
-    print(f"Done! Video ID: {vid}")
+            st, resp = req.next_chunk()
+            if st:
+                log(f"[Upload] {int(st.progress() * 100)}%")
+        except HttpError as e:
+            code = getattr(e.resp, "status", 0)
+            if code in (500, 502, 503, 504) and fails < 5:
+                fails += 1; time.sleep(2 ** fails); continue
+            if code == 403 and "quota" in str(e).lower():
+                raise RuntimeError("YouTube API daily quota exceeded (about 6 uploads/day). Try again tomorrow.") from e
+            raise
+    vid = resp["id"]
+    log(f"[Upload] done: https://youtu.be/{vid}")
+    if thumbnail_path and Path(thumbnail_path).exists():
+        try:
+            yt.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg")).execute()
+            log("[Upload] thumbnail set")
+        except Exception as e:  # needs a phone-verified channel; not fatal
+            log(f"[Upload] thumbnail not set (channel may need phone verification): {type(e).__name__}")
+    return vid

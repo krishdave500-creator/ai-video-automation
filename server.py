@@ -2,6 +2,11 @@
 Flask API Server for AI Video Pipeline
 =======================================
 Exposes /run endpoint to trigger video generation via HTTP POST.
+
+OPTIONAL / LEGACY: the recommended way to run this project is the GitHub Actions
+workflow. This server is only for people who want to trigger runs from n8n.
+Security: it refuses to start without API_TOKEN, only listens on 127.0.0.1 by
+default, and every request must send the header  X-API-Key: <API_TOKEN>.
 """
 
 from flask import Flask, request, jsonify
@@ -11,6 +16,7 @@ import os
 import threading
 
 app = Flask(__name__)
+API_TOKEN = os.getenv("API_TOKEN", "")
 
 # Global lock to prevent concurrent pipeline executions
 pipeline_lock = threading.Lock()
@@ -18,6 +24,8 @@ pipeline_lock = threading.Lock()
 
 @app.route("/run", methods=["POST"])
 def run_pipeline():
+    if not API_TOKEN or request.headers.get("X-API-Key", "") != API_TOKEN:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
     # Try to acquire lock (non-blocking)
     if not pipeline_lock.acquire(blocking=False):
         return jsonify({
@@ -67,11 +75,9 @@ def run_pipeline():
             upload = False
         
         # Validate inputs
-        if not topic:
-            return jsonify({
-                "status": "error",
-                "message": "Topic is required"
-            }), 400
+        if topic.startswith("-") or len(topic) > 200:
+            return jsonify({"status": "error", "message": "Invalid topic"}), 400
+        # empty topic is fine: the pipeline lets the AI pick a fresh one
         
         if format_choice not in ["short", "video"]:
             return jsonify({
@@ -98,13 +104,17 @@ def run_pipeline():
                 privacy
             ],
             check=True,
-            cwd=script_dir  # Run from the project directory
+            cwd=script_dir,  # Run from the project directory
+            timeout=3600,
         )
 
         return jsonify({
             "status": "success",
             "message": "Pipeline executed successfully"
         }), 200
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"status": "error", "message": "Pipeline timed out"}), 504
 
     except subprocess.CalledProcessError as e:
         return jsonify({
@@ -124,4 +134,6 @@ def run_pipeline():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    if not API_TOKEN:
+        sys.exit("Set API_TOKEN first (a long random string), then start the server again.")
+    app.run(host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "5000")))

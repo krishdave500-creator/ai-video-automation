@@ -1,120 +1,70 @@
+"""Captions from Edge TTS word timings -> ASS file (word-by-word highlight).
+No Whisper, no GPU, no big downloads."""
+import re
+from pathlib import Path
+
+from .config import CFG
+
+SAFE = re.compile(r"[{}\\]")
+
+
+def _t(sec: float) -> str:
+    sec = max(0.0, sec)
+    return f"{int(sec // 3600)}:{int(sec % 3600 // 60):02d}:{sec % 60:05.2f}"
+
+
+def group_words(words: list, size: int) -> list:
+    groups, cur = [], []
+    for w in words:
+        cur.append(w)
+        if len(cur) >= size or re.search(r"[.!?,;:।]$", w["text"]):
+            groups.append(cur); cur = []
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def build_ass(words: list, path: Path, portrait: bool, mode: str = "stock", title: str = "", title_end: float = 0.0) -> Path:
+    """mode "stock": captions in the picture. mode "bar": captions inside the black cinema bar (landscape)."""
+    W, H = (1080, 1920) if portrait else (1920, 1080)
+    size = 78 if portrait else 56
+    margin_v = 520 if portrait else 110
+    if mode == "bar":
+        size, margin_v = (74, 400) if portrait else (50, 44)
+    font = CFG.get("subtitle_font", "DejaVu Sans")
+    upper = CFG.get("subtitle_uppercase", True) and CFG.get("language", "en") == "en"
+    head = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {W}
+PlayResY: {H}
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+Style: Title,{font},{92 if portrait else 84},&H00FFFFFF,&H00FFFFFF,&H00301040,&H80000000,1,0,0,0,100,100,2,0,1,6,4,8,80,80,{300 if portrait else 165},1
+Style: Cap,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,{7 if portrait else 5},2,2,{90 if portrait else 200},{90 if portrait else 200},{margin_v},1
+
+[Events]
+Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
-Step 6 — Subtitles: generate .srt with Whisper and burn into video with FFmpeg.
-Uses OpenAI Whisper (free, local) for speech-to-text.
-"""
-
-import subprocess
-import os
-import shutil
-
-AUDIO_PATH = os.path.join("assets", "audio", "voice.mp3")
-VIDEO_INPUT = os.path.join("assets", "video", "final.mp4")
-VIDEO_OUTPUT = os.path.join("assets", "video", "final_subtitled.mp4")
-SRT_OUTPUT = os.path.join("assets", "audio", "voice.srt")
-
-
-def generate_srt(audio_path: str = AUDIO_PATH, output_dir: str = None) -> str:
-    """
-    Run Whisper on the audio file to produce an .srt subtitle file.
-    Returns the path to the generated .srt file.
-    """
-    if output_dir is None:
-        output_dir = os.path.dirname(audio_path)
-
-    if not os.path.exists(audio_path):
-        raise FileNotFoundError(f"Audio not found: {audio_path}")
-
-    # Check if whisper CLI is available
-    whisper_cmd = shutil.which("whisper")
-    if whisper_cmd is None:
-        # Try using the Python module directly
-        print("[Subtitles] whisper CLI not found, using Python module...")
-        return _generate_srt_python(audio_path, output_dir)
-
-    cmd = [
-        "whisper",
-        audio_path,
-        "--model", "tiny",
-        "--output_format", "srt",
-        "--output_dir", output_dir,
-        "--language", "en",
-    ]
-
-    print(f"[Subtitles] Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-
-    # Whisper names the file based on input filename
-    base = os.path.splitext(os.path.basename(audio_path))[0]
-    srt_path = os.path.join(output_dir, f"{base}.srt")
-
-    if os.path.exists(srt_path):
-        print(f"[Subtitles] SRT generated → {srt_path}")
-        return srt_path
-    else:
-        raise FileNotFoundError(f"Expected SRT file not found: {srt_path}")
-
-
-def _generate_srt_python(audio_path: str, output_dir: str) -> str:
-    """Fallback: use whisper Python API directly."""
-    import whisper
-
-    model = whisper.load_model("tiny")
-    result = model.transcribe(audio_path, language="en")
-
-    base = os.path.splitext(os.path.basename(audio_path))[0]
-    srt_path = os.path.join(output_dir, f"{base}.srt")
-
-    with open(srt_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(result["segments"], 1):
-            start = _format_timestamp(seg["start"])
-            end = _format_timestamp(seg["end"])
-            text = seg["text"].strip()
-            f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
-
-    print(f"[Subtitles] SRT generated → {srt_path}")
-    return srt_path
-
-
-def _format_timestamp(seconds: float) -> str:
-    """Convert seconds to SRT timestamp format HH:MM:SS,mmm."""
-    hrs = int(seconds // 3600)
-    mins = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int((seconds - int(seconds)) * 1000)
-    return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
-
-
-def burn_subtitles(
-    video_input: str = VIDEO_INPUT,
-    srt_path: str = SRT_OUTPUT,
-    video_output: str = VIDEO_OUTPUT,
-) -> str:
-    """
-    Burn .srt subtitles into the video using FFmpeg.
-    Returns the path to the subtitled video.
-    """
-    if not os.path.exists(video_input):
-        raise FileNotFoundError(f"Video not found: {video_input}")
-    if not os.path.exists(srt_path):
-        raise FileNotFoundError(f"SRT not found: {srt_path}")
-
-    # FFmpeg requires forward slashes or escaped backslashes in subtitle paths
-    srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_input,
-        "-vf", f"subtitles='{srt_escaped}':force_style='FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2'",
-        "-c:a", "copy",
-        video_output,
-    ]
-
-    print(f"[Subtitles] Burning subtitles into video...")
-    subprocess.run(cmd, check=True)
-    print(f"[Subtitles] Subtitled video → {video_output}")
-    return video_output
-
-
-if __name__ == "__main__":
-    srt = generate_srt()
-    burn_subtitles(srt_path=srt)
+    lines = []
+    if title and title_end > 0.5:
+        lines.append(f"Dialogue: 1,{_t(0.3)},{_t(title_end)},Title,,0,0,0,,{{\\fad(500,500)}}{SAFE.sub('', title)}")
+    groups = group_words(words, 3 if portrait else 6)
+    for gi, grp in enumerate(groups):
+        next_start = groups[gi + 1][0]["start"] if gi + 1 < len(groups) else None
+        texts = []
+        for w in grp:
+            tx = SAFE.sub("", w["text"])
+            texts.append(tx.upper() if upper else tx)
+        for i, w in enumerate(grp):
+            start = w["start"]
+            end = grp[i + 1]["start"] if i + 1 < len(grp) else max(w["end"], start + 0.2) + 0.15
+            if next_start is not None and i + 1 == len(grp):
+                end = min(end, next_start)      # never overlap the next caption group
+            if end <= start:
+                end = start + 0.05
+            parts = [("{\\c&H00D7FF&}%s{\\c&HFFFFFF&}" % t) if j == i else t for j, t in enumerate(texts)]
+            lines.append(f"Dialogue: 0,{_t(start)},{_t(end)},Cap,,0,0,0,,{' '.join(parts)}")
+    Path(path).write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
+    return Path(path)

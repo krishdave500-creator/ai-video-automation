@@ -1,11 +1,9 @@
-moviepy==1.0.3
-requests
-python-dotenv
-pydub
-edge-tts
-Pillow
-openai-whisper
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
-flask
+# Versions below are the ones the offline test-suite was run with.
+requests==2.34.2
+python-dotenv==1.2.4
+edge-tts==7.2.8
+Pillow==12.3.0
+numpy==2.5.4
+google-api-python-client==2.201.0
+google-auth==2.61.0
+google-auth-httplib2==0.4.4

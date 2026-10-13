@@ -1,0 +1,138 @@
+{
+ "source": "Hook formulas adapted from github.com/Jakeschincariol/youtube-agent-skill (MIT, (c) 2026 Jake Schincariol). See NOTICE.",
+ "rules": [
+  "Confirm the title in the first sentence. A hook that ignores its own title is why people leave at 0:08.",
+  "One idea. A hook carrying two promises keeps neither.",
+  "Specific beats big. '400 to 200,000 in seven months' outperforms 'massive growth'.",
+  "Show the artifact inside 20 seconds if you promised one.",
+  "Never open with who you are. The subscribe pitch has not been earned yet."
+ ],
+ "hooks": [
+  {
+   "id": "the-statistic",
+   "name": "The Statistic",
+   "shape": "A number the viewer did not know, stated flat, then the consequence.",
+   "fails_when": "Dies if the number is vague or unverifiable. Say the source out loud."
+  },
+  {
+   "id": "someone-elses-result",
+   "name": "Someone Else's Result",
+   "shape": "A named person's outcome, then the mechanism.",
+   "fails_when": "Do not invent the number. If you cannot name the channel, use a different formula."
+  },
+  {
+   "id": "the-mistake",
+   "name": "The Mistake",
+   "shape": "Name the error the viewer is probably making right now.",
+   "fails_when": "Only works if the mistake is common and the viewer can check it in one second."
+  },
+  {
+   "id": "contrarian-flip",
+   "name": "Contrarian Flip",
+   "shape": "State the accepted advice, then reject it.",
+   "fails_when": "Needs evidence in the next 15 seconds or it reads as contrarian for its own sake."
+  },
+  {
+   "id": "the-reveal",
+   "name": "The Reveal",
+   "shape": "Promise a specific thing will be shown, then show it.",
+   "fails_when": "You have to actually show it, early. A reveal at 8:00 is a retention cliff at 1:00."
+  },
+  {
+   "id": "the-superlative",
+   "name": "The Superlative",
+   "shape": "The single best/worst/fastest of a category.",
+   "fails_when": "Superlatives are cheap. Earn it by naming what it beat."
+  },
+  {
+   "id": "the-clock",
+   "name": "The Clock",
+   "shape": "Bound the payoff in time.",
+   "fails_when": "The clock has to be true. Overrun it and the next video's hook is not believed."
+  },
+  {
+   "id": "i-tried-it",
+   "name": "I Tried It",
+   "shape": "First-person experiment with a stated cost.",
+   "fails_when": "Needs a real cost - time, money, risk - or there is no stake."
+  },
+  {
+   "id": "the-question",
+   "name": "The Question",
+   "shape": "Ask the exact question the viewer typed into search.",
+   "fails_when": "Must be the viewer's question, not yours. Pull it from your own comments."
+  },
+  {
+   "id": "the-before-after",
+   "name": "Before and After",
+   "shape": "Two states, one cut between them.",
+   "fails_when": "Only works with a visual. Do not use it on a talking-head-only video."
+  },
+  {
+   "id": "the-teardown",
+   "name": "The Teardown",
+   "shape": "Take a real thing apart in public.",
+   "fails_when": "Name what you pulled and how many. A teardown of one example is an anecdote."
+  },
+  {
+   "id": "the-stack",
+   "name": "The Stack",
+   "shape": "Two named tools combined into one outcome.",
+   "fails_when": "Both tools must be nameable and the outcome must need both."
+  },
+  {
+   "id": "the-warning",
+   "name": "The Warning",
+   "shape": "A cost the viewer is about to pay.",
+   "fails_when": "If the cost is small the hook is a lie. Reserve it."
+  },
+  {
+   "id": "the-list",
+   "name": "The List",
+   "shape": "A counted set, with the count in the first line.",
+   "fails_when": "The count must be exact and every item must be different in kind."
+  },
+  {
+   "id": "the-receipt",
+   "name": "The Receipt",
+   "shape": "Show the artifact first, explain second.",
+   "fails_when": "Requires a real screenshot. A described receipt is not a receipt."
+  },
+  {
+   "id": "the-insider",
+   "name": "The Insider",
+   "shape": "Information from inside a system.",
+   "fails_when": "Do not claim insider access you do not have."
+  },
+  {
+   "id": "the-impossible",
+   "name": "The Impossible Claim",
+   "shape": "State something that sounds untrue, then prove it.",
+   "fails_when": "The proof has to start within 20 seconds or it reads as clickbait."
+  },
+  {
+   "id": "the-comparison",
+   "name": "The Comparison",
+   "shape": "Two named options, one winner.",
+   "fails_when": "Say the losing option out loud. A comparison with no loser is an advert."
+  },
+  {
+   "id": "the-origin",
+   "name": "The Origin",
+   "shape": "Where a result actually came from.",
+   "fails_when": "Works once per channel. It is a reveal about you, and you only have one."
+  },
+  {
+   "id": "the-deadline",
+   "name": "The Deadline",
+   "shape": "Something is changing on a date.",
+   "fails_when": "Only use with a real, checkable date. This is the fastest formula to lose trust with."
+  },
+  {
+   "id": "the-direct-address",
+   "name": "The Direct Address",
+   "shape": "Name the exact viewer in the first six words.",
+   "fails_when": "Narrow beats broad. 'If you make videos' addresses nobody."
+  }
+ ]
+}

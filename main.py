@@ -1,279 +1,174 @@
-"""
-AI Video Pipeline — main.py
-============================
-One trigger (topic) → fully automated YouTube video.
+"""AI video pipeline - one command: topic -> script -> voice -> visuals -> captions -> video -> thumbnail -> (upload).
 
-Pipeline Steps:
-  1. Input topic
-  2. Generate script with Gemini AI
-  3. Generate voiceover with Edge TTS
-  4. Fetch visuals from Pexels
-  5. Combine into .mp4 with MoviePy
-  6. Generate subtitles with Whisper & burn with FFmpeg
-  7. Create thumbnail with Pillow
-  8. Upload to YouTube (optional)
+  python main.py                                   # AI picks topic, makes a Short, does NOT upload
+  python main.py --format video --topic "How bridges stay up" --upload
+  python main.py "Topic" short true private         # old positional form (used by server.py / n8n)
 """
-
+import argparse
+import json
 import os
-import sys
 import shutil
+import sys
+import traceback
 from datetime import datetime
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-# ── Load environment variables ──────────────────────────────────────
 load_dotenv()
 
-# ── Import pipeline modules ─────────────────────────────────────────
-from scripts.generate_script import generate_script, extract_scenes, generate_metadata
-from scripts.generate_voice import make_voice
-from scripts.fetch_visuals import fetch_images_for_scenes, fetch_images
-from scripts.make_video import create_video
-from scripts.subtitles import generate_srt, burn_subtitles
-from scripts.thumbnail import create_thumbnail
-from scripts.upload_youtube import upload_video
-import glob
+from scripts.config import CFG  # noqa: E402
+from scripts.fetch_visuals import fetch_all  # noqa: E402
+from scripts.generate_film import generate_film_package  # noqa: E402
+from scripts.generate_script import generate_package, generate_topic  # noqa: E402
+from scripts.film import make_film, thumbnail_frame  # noqa: E402
+from scripts.packaging import make_chapters  # noqa: E402
+from scripts.generate_voice import make_voice  # noqa: E402
+from scripts.make_video import check_video, make_video  # noqa: E402
+from scripts.thumbnail import create_thumbnail, grab_frame  # noqa: E402
+from scripts.upload_youtube import upload_video  # noqa: E402
+from scripts.util import log  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent
+HISTORY = "data/topics_done.txt"
 
 
-def get_inputs():
-    args = sys.argv[1:]
-
-    if len(args) >= 4:
-        topic = args[0]
-        format_choice = args[1].lower()      # "short" or "video"
-        upload_choice = args[2].lower()       # "true" / "false"
-        privacy_choice = args[3].lower()      # "public" / "private"
-
-        upload = upload_choice == "true"
-
-        return {
-            "topic": topic,
-            "format": format_choice,
-            "upload": upload,
-            "privacy": privacy_choice
-        }
-
-    # ---- FALLBACK TO INTERACTIVE MODE ----
-    topic = input("Enter video topic: ")
-
-    format_input = input(
-        "Video type - (1) Video [landscape] or (2) Short [portrait]? (1/2): "
-    )
-    format_choice = "short" if format_input == "2" else "video"
-
-    upload_input = input("Upload to YouTube? (y/N): ").strip().lower()
-    upload = upload_input == "y"
-
-    privacy_choice = "private"
-    if upload:
-        privacy_input = input(
-            "Privacy - (1) Public or (2) Private? (1/2): "
-        )
-        privacy_choice = "public" if privacy_input == "1" else "private"
-
-    return {
-        "topic": topic,
-        "format": format_choice,
-        "upload": upload,
-        "privacy": privacy_choice
-    }
+def parse_args(argv):
+    if argv and not argv[0].startswith("-"):  # legacy: topic format upload privacy
+        ns = argparse.Namespace(topic=argv[0], format=(argv[1].lower() if len(argv) > 1 else "short"),
+                                upload=(len(argv) > 2 and argv[2].lower() == "true"),
+                                privacy=(argv[3].lower() if len(argv) > 3 else "private"), publish_at=None, keep_work=False)
+        return ns
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--topic", default="", help="leave empty to let AI pick")
+    ap.add_argument("--format", choices=["short", "video"], default="short")
+    ap.add_argument("--upload", action="store_true", help="upload to YouTube (private unless ALLOW_PUBLIC=true)")
+    ap.add_argument("--privacy", default="private")
+    ap.add_argument("--publish-at", default=None, help="e.g. 2026-10-20T09:00:00+05:30 (schedules a private upload)")
+    ap.add_argument("--keep-work", action="store_true", help="keep temporary files in runs/")
+    return ap.parse_args(argv)
 
 
-def cleanup_generated_files(run_dir: str = None, final_video: str = None):
-    """Delete all generated files in the run directory, keeping only the final video."""
-    if not run_dir or not os.path.exists(run_dir):
-        return
-    
-    print("\n[Cleanup] Removing generated files...")
-    
-    # Remove entire run directory except final video
-    if final_video and os.path.exists(final_video):
-        # Move final video to output directory before cleanup
-        output_dir = "output"
-        os.makedirs(output_dir, exist_ok=True)
-        final_output = os.path.join(output_dir, os.path.basename(final_video))
-        shutil.copy2(final_video, final_output)
-        print(f"  Copied final video → {final_output}")
-    
-    # Remove the entire run directory
-    try:
-        shutil.rmtree(run_dir)
-        print(f"  Deleted run directory → {run_dir}")
-    except Exception as e:
-        print(f"  Warning: Could not delete {run_dir}: {e}")
-    
-    print("[Cleanup] Done.")
+def read_history() -> list:
+    p = ROOT / HISTORY
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                out.append(parts[2])
+    return out
 
 
-def run_pipeline(
-    topic: str,
-    upload: bool = False,
-    format_type: str = "landscape",
-    privacy: str = "private",
-):
-    """Execute the full video-generation pipeline."""
+def record_topic(fmt: str, topic: str, video_id: str) -> None:
+    p = ROOT / HISTORY
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        p.write_text("# one line per finished video: date<TAB>format<TAB>topic<TAB>youtube_id\n", encoding="utf-8")
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now():%Y-%m-%d}\t{fmt}\t{topic}\t{video_id}\n")
 
-    # Create run-scoped directories with timestamp
+
+def run_pipeline(topic: str, fmt: str, upload: bool, privacy: str = "private", publish_at: str | None = None, keep_work: bool = False) -> dict:
+    if fmt not in ("short", "video"):
+        raise ValueError(f"format must be 'short' or 'video', got '{fmt}'")
+    portrait = fmt == "short"
+    style = CFG.get("style", "cinematic")
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join("runs", run_id)
-    
-    audio_dir = os.path.join(run_dir, "audio")
-    video_dir = os.path.join(run_dir, "video")
-    image_dir = os.path.join(run_dir, "images")
-    
-    os.makedirs(audio_dir, exist_ok=True)
-    os.makedirs(video_dir, exist_ok=True)
-    os.makedirs(image_dir, exist_ok=True)
-    
-    # Define file paths for this run
-    script_file = os.path.join(run_dir, "script.txt")
-    audio_file = os.path.join(audio_dir, "voice.mp3")
-    video_file = os.path.join(video_dir, "final.mp4")
-    srt_file = os.path.join(audio_dir, "voice.srt")
+    run_dir = ROOT / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log("=" * 60 + f"\n  RUN {run_id} | {fmt.upper()} | style={style} | upload={upload}\n" + "=" * 60)
 
-    print("=" * 60)
-    print(f"  AI VIDEO PIPELINE")
-    print(f"  Run ID: {run_id}")
-    print(f"  Topic: {topic}")
-    print(f"  Format: {format_type.upper()} ({'Shorts' if format_type == 'portrait' else 'Video'})")
-    print(f"  Privacy: {privacy.upper()}")
-    print("=" * 60)
+    if not topic:
+        log("[1/7] Picking a fresh topic...")
+        topic = generate_topic(read_history())
+    log(f"  Topic: {topic}")
 
-    # ── Step 1: Generate Script ──────────────────────────────────────
-    print("\n[Step 1/8] Generating script...")
-    script_text = generate_script(topic, format_type=format_type)
-
-    # Save script to file
-    with open(script_file, "w", encoding="utf-8") as f:
-        f.write(script_text)
-    print(f"  Script saved → {script_file} ({len(script_text)} chars)")
-
-    # ── Step 2: Split script into visual scenes ─────────────────────
-    print("\n[Step 2/8] Splitting script into visual scenes...")
-    scenes = extract_scenes(script_text)
-    for i, scene in enumerate(scenes, 1):
-        print(f"  Scene {i}: {scene}")
-
-    # ── Step 3: Generate metadata (title, description, tags) ─────────
-    print("\n[Step 3/8] Generating YouTube metadata...")
-    metadata = generate_metadata(topic, script_text)
-    print(f"  Title: {metadata['title']}")
-
-    # ── Step 4: Generate Voiceover ───────────────────────────────────
-    print("\n[Step 4/8] Generating voiceover...")
-    make_voice(script_text, output_path=audio_file)
-
-    # ── Step 5: Fetch Visuals (one per scene) ────────────────────────
-    print("\n[Step 5/8] Fetching visuals from Pexels (per scene)...")
-    # Temporarily change to image_dir for downloads
-    original_images_dir = os.path.join("assets", "images")
-    if scenes:
-        images = fetch_images_for_scenes(scenes)
-    else:
-        images = fetch_images(topic)
-
-    if not images:
-        print("  WARNING: No images fetched. Using fallback.")
-        images = fetch_images("nature landscape")
-    
-    # Move images to run-scoped directory
-    moved_images = []
-    for img in images:
-        if os.path.exists(img):
-            dest = os.path.join(image_dir, os.path.basename(img))
-            shutil.move(img, dest)
-            moved_images.append(dest)
-    images = moved_images
-
-    # ── Step 6: Create Video ─────────────────────────────────────────
-    print("\n[Step 6/8] Creating video...")
-    video_path = create_video(
-        images_dir=image_dir,
-        audio_path=audio_file,
-        output_path=video_file,
-        format_type=format_type
-    )
-
-    # ── Step 7: Subtitles ────────────────────────────────────────────
-    print("\n[Step 7/8] Generating subtitles...")
-    try:
-        srt_path = generate_srt(audio_path=audio_file, output_dir=audio_dir)
-        final_video_path = os.path.join(video_dir, "final_subtitled.mp4")
-        final_video = burn_subtitles(
-            video_input=video_file,
-            srt_path=srt_path,
-            video_output=final_video_path
-        )
-    except Exception as e:
-        print(f"  Subtitle generation failed: {e}")
-        print("  Continuing without subtitles...")
-        final_video = video_path
-
-    # ── Step 7b: Generate Thumbnail (skip for Shorts) ────────────────
-    thumbnail_path = None
-    if format_type == "landscape":
-        print("\n[Step 7b] Creating thumbnail...")
+    log("[2/7] Writing the script (hook, dialogue, title, description)...")
+    pkg, last = None, None
+    make = generate_film_package if style == "cinematic" else generate_package
+    for attempt in range(3):
         try:
-            thumb_path = os.path.join(video_dir, "thumbnail.jpg")
-            first_image = images[0] if images else None
-            thumbnail_path = create_thumbnail(
-                metadata["title"],
-                image_path=first_image,
-                output_path=thumb_path,
-                format_type=format_type
-            )
-        except Exception as e:
-            print(f"  Thumbnail generation failed: {e}")
-            thumbnail_path = None
-    else:
-        print("\n[Step 7b] Skipping thumbnail (not needed for Shorts).")
+            pkg = make(topic, fmt)
+            break
+        except ValueError as e:
+            last = e; log(f"  script rejected ({e}); retrying {attempt + 1}/3")
+    if pkg is None:
+        raise RuntimeError(f"Could not get a valid script: {last}")
+    log(f"  Title: {pkg['title']}")
 
-    # ── Step 8: Upload to YouTube (optional) ─────────────────────────
+    thumb, chapters, final, duration_s = None, "", None, 0.0
+    if style == "cinematic":
+        log("[3/7] Voices + animation + music (this is the long step)...")
+        film = make_film(pkg, run_dir, portrait)
+        final, duration_s = film["final"], film["duration"]
+        check_video(final, portrait)
+        log("[4/7] Packaging (thumbnail, chapters)...")
+        if not portrait:
+            try:
+                frame = thumbnail_frame(film["plan"], run_dir / "frame.png")
+                thumb = create_thumbnail(pkg["thumbnail_text"], frame, run_dir / "thumbnail.jpg")
+            except Exception as e:
+                log(f"  thumbnail failed (not fatal): {e}")
+            chapters = make_chapters([{"title": s["title"], "t0": sc["t0"]} for s, sc in zip(pkg["scenes"], film["plan"]["scenes"])])
+    else:
+        log("[3/7] Recording voice-over...")
+        voice = make_voice(pkg["scenes"], run_dir)
+        log("[4/7] Fetching visuals...")
+        visuals = fetch_all(pkg["scenes"], run_dir, portrait)
+        log("[5/7] Building video...")
+        vid = make_video(visuals, voice, run_dir, portrait)
+        final, duration_s = vid["final"], vid["duration"]
+        check_video(final, portrait)
+        if not portrait:
+            try:
+                frame = grab_frame(vid["first_segment"], run_dir / "frame.jpg", 0.8)
+                thumb = create_thumbnail(pkg["thumbnail_text"], frame, run_dir / "thumbnail.jpg")
+            except Exception as e:
+                log(f"  thumbnail failed (not fatal): {e}")
+
+    description = pkg["description"] + (("\n\nChapters:\n" + chapters) if chapters else "")
+    out_dir = ROOT / "output" / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(final, out_dir / "video.mp4")
+    if thumb:
+        shutil.copy2(thumb, out_dir / "thumbnail.jpg")
+
+    video_id = ""
     if upload:
-        is_short = (format_type == "portrait")
-        print(f"\n[Step 8/8] Uploading to YouTube {'Shorts' if is_short else ''}...")
-        try:
-            video_id = upload_video(
-                video_path=final_video,
-                title=metadata["title"],
-                description=metadata["description"],
-                tags=metadata["tags"],
-                thumbnail_path=thumbnail_path,
-                privacy=privacy,
-                is_short=is_short,
-            )
-            print(f"\n  YouTube URL: https://youtube.com/watch?v={video_id}")
-        except Exception as e:
-            print(f"  Upload failed: {e}")
-            print("  Video saved locally — you can upload manually.")
+        log("[7/7] Uploading to YouTube...")
+        video_id = upload_video(out_dir / "video.mp4", pkg["title"], description, pkg["tags"], privacy=privacy,
+                                publish_at=publish_at, thumbnail_path=(out_dir / "thumbnail.jpg") if thumb else None, is_short=portrait)
+        record_topic(fmt, topic, video_id)
     else:
-        print("\n[Step 8/8] Skipping upload.")
+        log("[7/7] Upload skipped (add --upload to publish privately).")
 
-    # ── Cleanup (always, keep final video) ─────────────────────────
-    cleanup_generated_files(run_dir=run_dir, final_video=final_video)
+    meta = {"run_id": run_id, "topic": topic, "format": fmt, "style": style, "title": pkg["title"], "description": description, "tags": pkg["tags"],
+            "duration_s": round(duration_s, 1), "video_id": video_id, "hook": pkg.get("hook", ""), "title_lint": pkg.get("lint"),
+            "characters": [c["name"] for c in pkg.get("characters", [])], "scenes": pkg["scenes"]}
+    (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    if not keep_work:
+        shutil.rmtree(run_dir, ignore_errors=True)
+    summary = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write(f"### {pkg['title']}\n- format: {fmt}, {meta['duration_s']}s, style {style}\n- uploaded: {('https://youtu.be/' + video_id) if video_id else 'no'}\n")
+    log(f"\nDONE -> {out_dir}")
+    return meta
 
-    # ── Done ─────────────────────────────────────────────────────────
-    output_video = os.path.join("output", os.path.basename(final_video))
-    print("\n" + "=" * 60)
-    print("  PIPELINE COMPLETE")
-    print(f"  Video  → {output_video}")
-    if thumbnail_path:
-        print(f"  Thumb  → {thumbnail_path}")
-    print(f"  Run ID → {run_id}")
-    print("=" * 60)
+
+def main(argv=None) -> int:
+    a = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        run_pipeline(a.topic, a.format, a.upload, a.privacy, a.publish_at, a.keep_work)
+        return 0
+    except Exception as e:  # fail loudly so CI turns red
+        traceback.print_exc()
+        print(f"\nPIPELINE FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    inputs = get_inputs()
-    TOPIC = inputs["topic"]
-    FORMAT = inputs["format"]      # "short" or "video"
-    UPLOAD = inputs["upload"]      # True / False
-    PRIVACY = inputs["privacy"]    # "public" / "private"
-
-    if not TOPIC:
-        print("Error: No topic provided.")
-        sys.exit(1)
-
-    # Map format choice to format_type for run_pipeline
-    format_type = "portrait" if FORMAT == "short" else "landscape"
-
-    run_pipeline(TOPIC, upload=UPLOAD, format_type=format_type, privacy=PRIVACY)
+    sys.exit(main())

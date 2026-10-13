@@ -1,140 +1,105 @@
-"""
-Step 4 — Fetch Visuals from Pexels (free API).
-Downloads high-quality stock images to use as video backgrounds.
-"""
+"""Visuals from Pexels (free API): real video clips first, photos as fallback.
+Never crashes the run because one scene has no match."""
+import os
+import random
+from pathlib import Path
 
 import requests
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
+from .util import log, retry
 
-IMAGES_DIR = os.path.join("assets", "images")
-
-
-def fetch_images(query: str, count: int = 6) -> list[str]:
-    """
-    Search Pexels for `query` and download `count` images.
-    Returns list of saved file paths.
-    """
-    api_key = os.getenv("PEXELS_API_KEY")
-    if not api_key:
-        raise RuntimeError("PEXELS_API_KEY not found in environment variables.")
-
-    headers = {"Authorization": api_key}
-    url = "https://api.pexels.com/v1/search"
-    params = {"query": query, "per_page": count, "orientation": "landscape"}
-
-    response = requests.get(url, headers=headers, params=params, timeout=30)
-    response.raise_for_status()
-
-    photos = response.json().get("photos", [])
-    if not photos:
-        print(f"[Visuals] No photos found for '{query}', trying fallback...")
-        # Fallback to a generic search
-        params["query"] = "nature landscape"
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        response.raise_for_status()
-        photos = response.json().get("photos", [])
-
-    os.makedirs(IMAGES_DIR, exist_ok=True)
-    saved = []
-
-    for i, photo in enumerate(photos[:count]):
-        img_url = photo["src"]["large"]  # Higher quality than 'medium'
-        img_data = requests.get(img_url, timeout=30).content
-        filepath = os.path.join(IMAGES_DIR, f"img{i}.jpg")
-        with open(filepath, "wb") as f:
-            f.write(img_data)
-        saved.append(filepath)
-        print(f"[Visuals] Downloaded img{i}.jpg  ({photo['src']['large']})")
-
-    return saved
+VIDEO_API = "https://api.pexels.com/videos/search"
+PHOTO_API = "https://api.pexels.com/v1/search"
 
 
-def fetch_images_for_keywords(keywords: list[str]) -> list[str]:
-    """
-    Download one image per keyword (up to 6 total).
-    Gives more variety than searching a single term.
-    """
-    api_key = os.getenv("PEXELS_API_KEY")
-    if not api_key:
-        raise RuntimeError("PEXELS_API_KEY not found in environment variables.")
-
-    headers = {"Authorization": api_key}
-    url = "https://api.pexels.com/v1/search"
-    os.makedirs(IMAGES_DIR, exist_ok=True)
-    saved = []
-
-    for i, keyword in enumerate(keywords[:6]):
-        params = {"query": keyword, "per_page": 1, "orientation": "landscape"}
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
-            photos = response.json().get("photos", [])
-            if photos:
-                img_url = photos[0]["src"]["large"]
-                img_data = requests.get(img_url, timeout=30).content
-                filepath = os.path.join(IMAGES_DIR, f"img{i}.jpg")
-                with open(filepath, "wb") as f:
-                    f.write(img_data)
-                saved.append(filepath)
-                print(f"[Visuals] img{i}.jpg ← '{keyword}'")
-            else:
-                print(f"[Visuals] No result for '{keyword}', skipping.")
-        except Exception as e:
-            print(f"[Visuals] Error fetching '{keyword}': {e}")
-
-    return saved
+def _key() -> str:
+    k = os.getenv("PEXELS_API_KEY")
+    if not k:
+        raise RuntimeError("PEXELS_API_KEY is not set")
+    return k
 
 
-def fetch_images_for_scenes(scene_descriptions: list[str]) -> list[str]:
-    """
-    Download one image per scene description.
-    Each description comes from Gemini's scene breakdown of the script,
-    so the images directly match the video's visual narrative.
-    """
-    api_key = os.getenv("PEXELS_API_KEY")
-    if not api_key:
-        raise RuntimeError("PEXELS_API_KEY not found in environment variables.")
-
-    headers = {"Authorization": api_key}
-    url = "https://api.pexels.com/v1/search"
-    os.makedirs(IMAGES_DIR, exist_ok=True)
-    saved = []
-
-    for i, description in enumerate(scene_descriptions):
-        params = {"query": description, "per_page": 1, "orientation": "landscape"}
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
-            photos = response.json().get("photos", [])
-
-            if not photos:
-                # Simplify the query by taking the first 3 words as fallback
-                short_query = " ".join(description.split()[:3])
-                print(f"[Visuals] No result for scene {i+1}, retrying with '{short_query}'...")
-                params["query"] = short_query
-                response = requests.get(url, headers=headers, params=params, timeout=30)
-                response.raise_for_status()
-                photos = response.json().get("photos", [])
-
-            if photos:
-                img_url = photos[0]["src"]["large"]
-                img_data = requests.get(img_url, timeout=30).content
-                filepath = os.path.join(IMAGES_DIR, f"img{i}.jpg")
-                with open(filepath, "wb") as f:
-                    f.write(img_data)
-                saved.append(filepath)
-                print(f"[Visuals] img{i}.jpg ← Scene {i+1}: '{description}'")
-            else:
-                print(f"[Visuals] No image found for scene {i+1}: '{description}', skipping.")
-        except Exception as e:
-            print(f"[Visuals] Error fetching scene {i+1} '{description}': {e}")
-
-    return saved
+@retry(times=3, delay=2.0, exceptions=(requests.RequestException,))
+def _get(url: str, params: dict) -> dict:
+    r = requests.get(url, headers={"Authorization": _key()}, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
 
 
-if __name__ == "__main__":
-    query = input("Search query: ")
-    fetch_images(query)
+@retry(times=3, delay=2.0, exceptions=(requests.RequestException,))
+def _download(url: str, dest: str) -> None:
+    with requests.get(url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(1 << 20):
+                f.write(chunk)
+
+
+def pick_video_file(video: dict, portrait: bool):
+    files = [f for f in video.get("video_files", []) if f.get("file_type") == "video/mp4" and f.get("width") and f.get("height")]
+    if not files:
+        return None
+    want = 1080 if portrait else 1920          # ideal width in pixels
+    floor = 720 if portrait else 1280          # below this the picture looks soft
+
+    def score(f):
+        return (0 if f["width"] >= floor else 1, abs(f["width"] - want))
+    return sorted(files, key=score)[0]
+
+
+def _try_video(query: str, dest: Path, portrait: bool, used: set):
+    data = _get(VIDEO_API, {"query": query, "per_page": 15, "orientation": "portrait" if portrait else "landscape", "size": "medium"})
+    cands = [v for v in data.get("videos", []) if v.get("id") not in used and v.get("duration", 0) >= 3]
+    top = cands[:6]
+    random.shuffle(top)
+    for v in top:
+        f = pick_video_file(v, portrait)
+        if f:
+            _download(f["link"], str(dest))
+            used.add(v["id"])
+            return {"kind": "video", "path": dest}
+    return None
+
+
+def _try_photo(query: str, dest: Path, portrait: bool, used: set):
+    data = _get(PHOTO_API, {"query": query, "per_page": 10, "orientation": "portrait" if portrait else "landscape"})
+    for p in data.get("photos", []):
+        if ("p%s" % p.get("id")) in used:
+            continue
+        url = p["src"].get("large2x") or p["src"].get("large") or p["src"].get("original")
+        _download(url, str(dest))
+        used.add("p%s" % p.get("id"))
+        return {"kind": "photo", "path": dest}
+    return None
+
+
+def fetch_scene_visual(query: str, run_dir: Path, idx: int, portrait: bool, used: set):
+    vid_dest = Path(run_dir) / "visuals" / f"v{idx:02d}.mp4"
+    img_dest = Path(run_dir) / "visuals" / f"v{idx:02d}.jpg"
+    words = query.split()
+    attempts = [query, " ".join(words[:2]) if len(words) > 2 else None, "abstract background"]
+    for q in [a for a in attempts if a]:
+        for fn, dest in ((_try_video, vid_dest), (_try_photo, img_dest)):
+            try:
+                got = fn(q, dest, portrait, used)
+                if got:
+                    return got
+            except Exception as e:  # keep going: a missing visual must not kill the run
+                log(f"[Visuals] '{q}' ({fn.__name__}) failed: {type(e).__name__}")
+    return None
+
+
+def fetch_all(scenes: list, run_dir: Path, portrait: bool) -> list:
+    (Path(run_dir) / "visuals").mkdir(parents=True, exist_ok=True)
+    used, out = set(), []
+    for i, sc in enumerate(scenes):
+        got = fetch_scene_visual(sc["visual"], run_dir, i, portrait, used)
+        if got is None and out:
+            got = out[-1]   # reuse the previous picture rather than fail
+            log(f"[Visuals] scene {i + 1}: no match, reusing previous visual")
+        elif got is None:
+            log(f"[Visuals] scene {i + 1}: no match, using colour background")
+        else:
+            log(f"[Visuals] scene {i + 1}: {got['kind']} <- '{sc['visual']}'")
+        out.append(got)
+    return out

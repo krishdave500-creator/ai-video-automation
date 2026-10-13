@@ -1,0 +1,27 @@
+{
+  "niche": "surprising science and everyday facts that make people say 'wow, I didn't know that'",
+  "language": "en",
+  "language_name": "English",
+  "voice": "en-IN-NeerjaNeural",
+  "voice_rate": "+0%",
+  "subtitle_font": "DejaVu Sans",
+  "subtitle_uppercase": true,
+  "gemini_model": "gemini-3.8-flash",
+  "gemini_fallbacks": [
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash"
+  ],
+  "category_id": "27",
+  "privacy": "private",
+  "short": {
+    "min_scenes": 6,
+    "max_scenes": 8,
+    "seconds": "30-45"
+  },
+  "video": {
+    "min_scenes": 10,
+    "max_scenes": 14,
+    "seconds": "90-150"
+  },
+  "style": "cinematic"
+}
