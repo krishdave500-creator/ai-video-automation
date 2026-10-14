@@ -1,10 +1,10 @@
 {
   "niche": "surprising science and everyday facts that make people say 'wow, I didn't know that'",
-  "language": "en",
-  "language_name": "English",
-  "voice": "en-IN-NeerjaNeural",
+  "language": "gu",
+  "language_name": "Gujarati",
+  "voice": "gu-IN-DhwaniNeural",
   "voice_rate": "+0%",
-  "subtitle_font": "DejaVu Sans",
+  "subtitle_font": "Noto Sans Gujarati",
   "subtitle_uppercase": true,
   "gemini_model": "gemini-3.8-flash",
   "gemini_fallbacks": [
