@@ -1,0 +1,91 @@
+name: Create and upload video
+
+on:
+  workflow_dispatch:
+    inputs:
+      format:
+        description: "short = vertical YouTube Short, video = horizontal video"
+        type: choice
+        options: [short, video]
+        default: short
+      topic:
+        description: "Leave EMPTY to let the AI pick a fresh topic"
+        type: string
+        required: false
+        default: ""
+      upload:
+        description: "Upload to YouTube (always PRIVATE for now)"
+        type: boolean
+        default: false
+  # Automatic runs. They stay OFF until you create the repository variable ENABLE_SCHEDULE = true
+  schedule:
+    - cron: "30 3 * * *"   # every day 09:00 India time  -> Short
+    - cron: "0 5 * * 0"    # every Sunday 10:30 India time -> long video
+
+permissions:
+  contents: write           # only used to save data/topics_done.txt
+
+concurrency:
+  group: video-pipeline
+  cancel-in-progress: false
+
+jobs:
+  make-video:
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_SCHEDULE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      FORMAT: ${{ github.event.inputs.format || (github.event.schedule == '0 5 * * 0' && 'video' || 'short') }}
+      INPUT_TOPIC: ${{ github.event.inputs.topic }}
+      DO_UPLOAD: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.upload }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ffmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-core
+
+      - name: Cache voice models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: voice-models-v1
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Create video
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          ARGS=(--format "$FORMAT")
+          if [ -n "$INPUT_TOPIC" ]; then ARGS+=(--topic "$INPUT_TOPIC"); fi
+          if [ "$DO_UPLOAD" = "true" ]; then ARGS+=(--upload); fi
+          python main.py "${ARGS[@]}"
+
+      - name: Keep the video (download from the run page, 7 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-output
+          path: output/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Save topic history
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/topics_done.txt
+          git diff --cached --quiet || (git commit -m "chore: record finished topic" && git pull --rebase && git push)
