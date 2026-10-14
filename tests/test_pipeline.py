@@ -375,5 +375,44 @@ class CinemaPipeline(unittest.TestCase):
         self.assertTrue(any(v < 0.05 for v in plan["fade"]))                                      # fades between scenes
 
 
+from scripts import local_tts  # noqa: E402
+
+
+class LocalVoices(unittest.TestCase):
+    def test_distinct_voices_in_every_language(self):
+        chars = generate_film.validate_film(film_pkg(), "short")["characters"]
+        for lang in ("en", "hi", "gu"):
+            specs = local_tts.local_voices(chars, lang)
+            keys = [(s["model"], s["sid"], s["ratio"]) for s in specs]
+            self.assertEqual(len(set(keys)), len(keys), lang)                # nobody shares the exact same voice
+            self.assertGreater(specs[0]["ratio"] * (1 if lang != "gu" else 1), 0.9)
+        en = local_tts.local_voices(chars, "en")
+        self.assertGreater(en[0]["ratio"], 1.2)                               # the girl is pitched up
+        self.assertEqual(en[0]["sid"], 4)
+
+    def test_engine_choice(self):
+        async def blocked(text, mp3, **kw):
+            raise RuntimeError("403 blocked")
+        with mock.patch.dict(film.CFG, {"tts_engine": "auto"}):
+            with mock.patch.object(generate_voice, "_stream_scene", blocked):
+                self.assertEqual(film.pick_engine(), "local")
+            with mock.patch.object(generate_voice, "_stream_scene", fake_stream):
+                self.assertEqual(film.pick_engine(), "edge")
+        with mock.patch.dict(film.CFG, {"tts_engine": "local"}):
+            self.assertEqual(film.pick_engine(), "local")
+
+    def test_film_builds_with_local_engine(self):
+        def fake_speak(text, spec, wav):
+            ff("-f", "lavfi", "-i", f"sine=frequency={150 + spec['sid'] * 20}:duration={max(1.2, 0.33 * len(text.split()))}", "-ac", "1", "-ar", "22050", "-sample_fmt", "s16", str(wav))
+        async def blocked(text, mp3, **kw):
+            raise RuntimeError("403 blocked")
+        pkg = generate_film.validate_film(film_pkg(12), "short")
+        with mock.patch.dict(film.CFG, {"tts_engine": "auto"}), mock.patch.object(generate_voice, "_stream_scene", blocked), \
+             mock.patch.object(local_tts, "speak", fake_speak), mock.patch.dict(os.environ, {"CINEMA_FPS": "8"}):
+            plan, tl, _ = film.build_plan(pkg, TMP / "local_plan", True)
+        self.assertGreater(len(plan["words"]), 30)                            # captions come from estimated timings
+        self.assertTrue(all(w["end"] >= w["start"] for w in plan["words"]))
+
+
 if __name__ == "__main__":
     unittest.main()
