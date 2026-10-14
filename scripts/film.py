@@ -12,6 +12,8 @@ from PIL import Image
 
 from . import cinema as C
 from .config import CFG
+from . import local_tts
+from . import generate_voice as gv
 from .generate_voice import _synth, estimate_words
 from .subtitles import build_ass
 from .util import duration, log, run
@@ -65,8 +67,29 @@ def narrator_voice() -> dict:
     return {"voice": pool[-1], "pitch": -12, "rate": -8}
 
 
+_ENGINE = {}
+
+
+def pick_engine() -> str:
+    """'edge' (Microsoft neural voices, best) when reachable; otherwise 'local' (runs on this machine).
+    GitHub's machines are blocked by Edge TTS (HTTP 403), so there it always becomes 'local'."""
+    mode = CFG.get("tts_engine", "auto")
+    if mode in ("edge", "local"):
+        return mode
+    import asyncio, tempfile
+    try:
+        asyncio.run(gv._stream_scene("Hello.", os.path.join(tempfile.mkdtemp(), "probe.mp3")))
+        return "edge"
+    except Exception as e:  # noqa: BLE001
+        log(f"[Voice] Edge TTS not reachable ({type(e).__name__}); using the built-in local neural voices")
+        return "local"
+
+
 def synth_line(text: str, vp: dict, wav: Path) -> list:
     """Speak one line. Falls back to the default channel voice if a voice name is unavailable."""
+    if _ENGINE.get("name") == "local":
+        local_tts.speak(text, vp, wav)
+        return []
     mp3 = wav.with_suffix(".mp3")
     try:
         words = _synth(text, mp3, voice=vp["voice"], rate=f"{vp['rate']:+d}%", pitch=f"{vp['pitch']:+d}Hz")
@@ -164,7 +187,10 @@ def build_plan(pkg: dict, run_dir: Path, portrait: bool, limit: float | None = N
     layout = "portrait" if portrait else "landscape"
     C.set_layout(layout); LY = C.LY; F = fps()
     chars = pkg["characters"]; narr = dict(NARRATOR, name=pkg.get("narrator_name", NARRATOR["name"]))
-    vps = assign_voices(chars)
+    _ENGINE["name"] = pick_engine()
+    lang = CFG.get("language", "en")
+    log(f"[Voice] engine: {_ENGINE['name']}")
+    vps = local_tts.local_voices(chars, lang) if _ENGINE["name"] == "local" else assign_voices(chars)
     intro = 1.3 if portrait else 3.4; gap = 0.3 if portrait else 0.45; fade_edge = .25 if portrait else .5
     work = Path(run_dir) / "film"; work.mkdir(parents=True, exist_ok=True)
     t = 0.0; scenes = []; tl = []; words = []; n = 0
@@ -178,7 +204,7 @@ def build_plan(pkg: dict, run_dir: Path, portrait: bool, limit: float | None = N
         t0 = t; t = t0 + (intro if si == 0 else 0.4); prev_x = None
         for k, ln in enumerate(sc["lines"]):
             n += 1; wav = work / f"l{n:02d}.wav"
-            vp = narrator_voice() if ln["who"] < 0 else vps[ln["who"]]
+            vp = (local_tts.narrator_voice(lang) if _ENGINE["name"] == "local" else narrator_voice()) if ln["who"] < 0 else vps[ln["who"]]
             w = synth_line(ln["text"], vp, wav)
             x = read_wav(wav); dur = len(x) / SR
             if len(w) < max(1, len(ln["text"].split()) // 2): w = estimate_words(ln["text"], dur)

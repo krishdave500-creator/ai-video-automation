@@ -18,6 +18,9 @@ class GeminiError(RuntimeError):
     pass
 
 
+_GOOD = {"model": None}      # the model that last worked (used first next time)
+
+
 def _extract(data: dict) -> str:
     cands = data.get("candidates") or []
     if not cands:
@@ -37,13 +40,16 @@ def generate(prompt: str, json_mode: bool = True, temperature: float = 0.9) -> s
     if not key:
         raise GeminiError("GEMINI_API_KEY is not set")
     models = [CFG["gemini_model"]] + [m for m in CFG.get("gemini_fallbacks", []) if m != CFG["gemini_model"]]
+    if _GOOD["model"] in models:
+        models.remove(_GOOD["model"]); models.insert(0, _GOOD["model"])
     gen_cfg = {"temperature": temperature, "maxOutputTokens": 8192}
     if json_mode:
         gen_cfg["responseMimeType"] = "application/json"
     body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": gen_cfg}
     last = "unknown error"
-    for model in models:
-        for attempt in range(4):
+    for mi, model in enumerate(models):
+        tries = 4 if mi == len(models) - 1 else 2     # move on quickly to the next model
+        for attempt in range(tries):
             try:
                 r = requests.post(API.format(model), headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                                   json=body, timeout=90)
@@ -53,7 +59,11 @@ def generate(prompt: str, json_mode: bool = True, temperature: float = 0.9) -> s
                 continue
             if r.status_code == 200:
                 try:
-                    return _extract(r.json())
+                    text = _extract(r.json())
+                    if _GOOD["model"] != model:
+                        log(f"[Gemini] using model {model}")
+                        _GOOD["model"] = model
+                    return text
                 except GeminiError as e:
                     last = f"{model}: {e}"
                     continue
